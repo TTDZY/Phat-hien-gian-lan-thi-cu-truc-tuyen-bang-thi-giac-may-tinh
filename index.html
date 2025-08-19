@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Phát hiện gian lận thi cử · YOLO</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .soft-card{border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.06)}
+    .video-wrap{position:relative;width:100%;aspect-ratio:16/9;background:#0b1220}
+    .video-wrap video,.video-wrap canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+    .btn{padding:.5rem 1rem;border-radius:.75rem;font-weight:600}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-ghost{background:#fff;border:1px solid #e5e7eb}
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div class="mx-auto max-w-6xl p-6">
+    <h1 class="text-2xl font-bold mb-4">🎥 Hệ thống phát hiện gian lận thi cử</h1>
+
+    <div class="grid lg:grid-cols-3 gap-6">
+      <div class="lg:col-span-2 soft-card p-5 bg-white">
+        <h2 class="font-semibold mb-3">1) Chọn nguồn video</h2>
+
+        <input id="fileInput" type="file" accept="video/*" class="mb-3"/>
+        <div class="grid md:grid-cols-3 gap-3 items-end">
+          <div>
+            <label class="text-sm">Confidence <span id="confVal" class="font-semibold">0.25</span></label>
+            <input id="conf" type="range" min="0" max="1" step="0.01" value="0.25" class="w-full">
+          </div>
+          <div>
+            <label class="text-sm">IoU <span id="iouVal" class="font-semibold">0.45</span></label>
+            <input id="iou" type="range" min="0" max="1" step="0.01" value="0.45" class="w-full">
+          </div>
+          <div class="flex gap-2">
+            <button id="runVideo" class="btn btn-primary w-full">Chạy & nhận MP4</button>
+            <button id="runJson" class="btn btn-ghost w-full">Chạy & nhận JSON</button>
+          </div>
+        </div>
+
+        <div id="progressWrap" class="mt-4 hidden">
+          <div class="flex justify-between text-xs text-slate-500 mb-1">
+            <span>Tiến độ</span><span id="progressText">0%</span>
+          </div>
+          <div class="w-full bg-slate-200 rounded-full overflow-hidden" style="height:8px">
+            <div id="progressBar" style="height:8px;background:#4f46e5;width:0%"></div>
+          </div>
+        </div>
+      </div>
+
+      <aside class="soft-card p-5 bg-white">
+        <h3 class="font-semibold mb-3">2) Hướng dẫn</h3>
+        <ol class="list-decimal pl-5 text-sm space-y-1">
+          <li>Chọn video đầu vào.</li>
+          <li>Bấm <b>Chạy & nhận MP4</b> để lấy video đã gắn nhãn.</li>
+          <li>Hoặc <b>Chạy & nhận JSON</b> để hiển thị bbox bằng Canvas.</li>
+        </ol>
+      </aside>
+    </div>
+
+    <div class="grid lg:grid-cols-2 gap-6 mt-6">
+      <div class="soft-card p-5 bg-white">
+        <h3 class="font-semibold mb-3">Nguồn</h3>
+        <div class="video-wrap"><video id="srcVideo" controls></video></div>
+      </div>
+      <div class="soft-card p-5 bg-white">
+        <h3 class="font-semibold mb-3">Kết quả</h3>
+        <div class="video-wrap">
+          <video id="outVideo" controls></video>
+          <canvas id="overlay" class="pointer-events-none"></canvas>
+        </div>
+        <p class="text-xs text-slate-500 mt-2">* Ở chế độ JSON, Canvas sẽ vẽ bbox theo thời gian (dựa vào <code>currentTime</code> của video).</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ==== cấu hình ====
+    const BACKEND_URL = "http://127.0.0.1:8000"; // đổi khi deploy
+
+    // ==== DOM ====
+    const fileInput = document.getElementById("fileInput");
+    const srcVideo  = document.getElementById("srcVideo");
+    const outVideo  = document.getElementById("outVideo");
+    const overlay   = document.getElementById("overlay");
+    const runVideo  = document.getElementById("runVideo");
+    const runJson   = document.getElementById("runJson");
+    const progressWrap = document.getElementById("progressWrap");
+    const progressBar  = document.getElementById("progressBar");
+    const progressText = document.getElementById("progressText");
+    const conf = document.getElementById("conf");
+    const iou  = document.getElementById("iou");
+    const confVal = document.getElementById("confVal");
+    const iouVal  = document.getElementById("iouVal");
+
+    conf.addEventListener('input', () => confVal.textContent = Number(conf.value).toFixed(2));
+    iou.addEventListener('input',  () => iouVal.textContent  = Number(iou.value).toFixed(2));
+
+    fileInput.addEventListener("change", () => {
+      const f = fileInput.files?.[0];
+      if (!f) return;
+      const url = URL.createObjectURL(f);
+      srcVideo.src = url;
+      srcVideo.load();
+    });
+
+    function showProgressSim() {
+      progressWrap.classList.remove("hidden");
+      let p = 0;
+      const id = setInterval(() => {
+        p = Math.min(100, p + 3);
+        progressBar.style.width = p + "%";
+        progressText.textContent = p + "%";
+        if (p >= 100) clearInterval(id);
+      }, 120);
+    }
+
+    // ==== Chế độ nhận MP4 ====
+    runVideo.addEventListener("click", async () => {
+      const f = fileInput.files?.[0];
+      if (!f) { alert("Vui lòng chọn video."); return; }
+
+      // reset
+      overlay.getContext('2d').clearRect(0,0,overlay.width,overlay.height);
+      outVideo.removeAttribute('src'); outVideo.load();
+
+      const form = new FormData();
+      form.append("file", f);
+      form.append("conf", conf.value);
+      form.append("iou",  iou.value);
+      form.append("model_name", "best.pt");
+
+      showProgressSim();
+
+      const resp = await fetch(`${BACKEND_URL}/detect`, { method: "POST", body: form });
+      if (!resp.ok) {
+        alert("API lỗi."); return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      outVideo.src = url; outVideo.load();
+    });
+
+    // ==== Chế độ nhận JSON + vẽ Canvas ====
+    let timeline = null; let fps = 25;
+    runJson.addEventListener("click", async () => {
+      const f = fileInput.files?.[0];
+      if (!f) { alert("Vui lòng chọn video."); return; }
+
+      const form = new FormData();
+      form.append("file", f);
+      form.append("conf", conf.value);
+      form.append("iou",  iou.value);
+
+      showProgressSim();
+
+      const resp = await fetch(`${BACKEND_URL}/detect-json`, { method: "POST", body: form });
+      if (!resp.ok) { alert("API lỗi."); return; }
+      const data = await resp.json();
+      fps = data.fps || 25;
+      timeline = data.timeline || [];
+
+      // Hiển thị lại video nguồn để đồng bộ thời gian
+      const url = URL.createObjectURL(f);
+      outVideo.src = url; outVideo.load();
+
+      // Bắt đầu vẽ khi phát
+      outVideo.addEventListener("timeupdate", drawForCurrentTime);
+      outVideo.addEventListener("loadeddata", () => drawForCurrentTime());
+    });
+
+    function drawForCurrentTime() {
+      if (!timeline) return;
+      const t = outVideo.currentTime; // giây
+      // chọn frame gần nhất
+      let best = null, dmin = 1e9;
+      for (const fr of timeline) {
+        const d = Math.abs(fr.t - t);
+        if (d < dmin) { dmin = d; best = fr; }
+      }
+      drawBoxes(best ? best.boxes : []);
+    }
+
+    function drawBoxes(boxes) {
+      const ctx = overlay.getContext("2d");
+      const vw = outVideo.clientWidth || outVideo.videoWidth;
+      const vh = outVideo.clientHeight || outVideo.videoHeight;
+      overlay.width = vw; overlay.height = vh;
+      ctx.clearRect(0,0,vw,vh);
+      ctx.lineWidth = 2; ctx.font = "12px ui-sans-serif";
+      boxes.forEach(b => {
+        const {x,y,w,h,label,score} = b;
+        ctx.strokeStyle = "#4f46e5"; ctx.fillStyle = "rgba(79,70,229,.18)";
+        ctx.strokeRect(x*vw, y*vh, w*vw, h*vh);
+        ctx.fillRect(x*vw, y*vh, w*vw, h*vh);
+        const tag = `${label} ${(score*100).toFixed(0)}%`;
+        ctx.fillStyle = "#111827";
+        const tw = ctx.measureText(tag).width + 10;
+        ctx.fillRect(x*vw, Math.max(0, y*vh-18), tw, 18);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(tag, x*vw+5, Math.max(12, y*vh-5));
+      });
+    }
+  </script>
+</body>
+</html>
